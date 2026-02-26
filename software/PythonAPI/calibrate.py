@@ -5,15 +5,8 @@ from calibration_plotter import calibrate_and_plot
 oms = OpenMicroStageInterface(show_communication=True, show_log_messages=True)
 oms.connect('/dev/ttyACM0')
 
-# Setze aktuelle Position als 0 0 0
-oms.set_anchor_point()
+# Kalibriere die Gelenke und plotte die Ergebnisse
+calibrate_and_plot(oms)
 
-# Aktiviere Motoren
-oms.enable_motors(enable=True)
-
-# Move Position to 0 0 0
-oms.move_to(0, 0, 0, f=10)
-oms.wait_for_stop()
-
-# print some info
-oms.read_device_state_info()
+# Schalte Motoren aus
+oms.enable_motors(enable=False)

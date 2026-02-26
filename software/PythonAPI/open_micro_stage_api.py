@@ -215,6 +215,7 @@ class OpenMicroStageInterface:
         self.show_communication = show_communication
         self.show_log_messages = show_log_messages
         self.disable_message_callbacks = False
+        self.anchor_point = None # 0 1 3
 
     def connect(self, port: str, baud_rate: int = 921600):
         def version_to_str(v):
@@ -285,6 +286,19 @@ class OpenMicroStageInterface:
         major, minor, patch = map(int, re.match(r'v(\d+)\.(\d+)\.(\d+)', response).groups())
         return major,minor,patch
 
+    def set_anchor_point(self):
+        """
+        Queries the current position from the device and saves it as the anchor point.
+        """
+        x, y, z = self.read_current_position() # M50 command
+        if x is not None:
+            self.anchor_point = (x, y, z)
+            print(f"Anchor point set to: X={x}, Y={y}, Z={z}")
+            return True
+        else:
+            print("Failed to read position for anchor point.")
+            return False
+
     def home(self, axis_list=None):
         """
         Homes one or more axes on the device
@@ -333,6 +347,12 @@ class OpenMicroStageInterface:
         :param timeout: Timeout in seconds for each command attempt.
         :return: Status of the move command (e.g. OK, ERROR, BUSY, TIMEOUT).
         """
+        # Apply anchor point offset if set
+        if self.anchor_point is not None:
+            x += self.anchor_point[0] # 0
+            y += self.anchor_point[1] # 1
+            z += self.anchor_point[2] # 3
+
         # Convert to homogeneous vector
         transformed = self.workspace_transform @ np.array([x, y, z, 1.0])
         x_t, y_t, z_t = transformed[:3] / transformed[3]

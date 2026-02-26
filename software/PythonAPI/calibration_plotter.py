@@ -21,20 +21,24 @@ def plot_calibration_data(ax_encoder_counts, ax_field_angel, label, data):
         ax_field_angel.legend()
         ax_field_angel.grid(True)
 
-def main():
-    # create interface and connect
-    oms = OpenMicroStageInterface(show_communication=True, show_log_messages=True)
-    oms.connect('/dev/ttyACM0')
-
+def calibrate_and_plot(oms):
     # Create subplots
     fig, ax = plt.subplots(1, 1, figsize=(10, 7), sharex='all')
 
     for i in range(3):
-        res, data = oms.calibrate_joint(i, save_result=False)
+        res, data = oms.calibrate_joint(i, save_result=True)
         plot_calibration_data(ax, None, f'Actuator {i}', data)
 
     # Adjust layout and show
     plt.tight_layout()
     plt.show()
 
-main()
+def main():
+    # create interface and connect
+    oms = OpenMicroStageInterface(show_communication=True, show_log_messages=True)
+    oms.connect('/dev/ttyACM0')
+
+    calibrate_and_plot(oms)
+
+if __name__ == "__main__":
+    main()

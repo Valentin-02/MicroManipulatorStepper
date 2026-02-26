@@ -5,7 +5,7 @@ oms = OpenMicroStageInterface(show_communication=True, show_log_messages=True)
 oms.connect('/dev/ttyACM0')
 
 # run this once to calibrate joints
-# for i in range(3): oms.calibrate_joint(i, save_result=True)
+for i in range(3): oms.calibrate_joint(i, save_result=True)
 
 # home device
 oms.home()

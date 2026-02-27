@@ -5,10 +5,12 @@ from calibration_plotter import calibrate_and_plot
 oms = OpenMicroStageInterface(show_communication=True, show_log_messages=True)
 oms.connect('COM8')
 
-# oms.get_anchor_point()
+oms.enable_motors(False)
+input("Richte den neuen Ankerpunkt aus...")
+oms.set_anchor_point()
 
-# # Aktiviere Motoren
-# oms.enable_motors(enable=True)
+# Aktiviere Motoren
+oms.enable_motors(enable=True)
 
 # Move Position to 0 0 0
 oms.move_to(0, 0, 0, f=10)

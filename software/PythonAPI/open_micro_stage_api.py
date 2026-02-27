@@ -2,10 +2,12 @@ import threading
 import time
 import re
 from enum import Enum
+import os
 
 import serial
 import numpy as np
 from colorama import Fore, Style, init
+import json
 
 # --- SerialInterface --------------------------------------------------------------------------------------------------
 
@@ -215,7 +217,7 @@ class OpenMicroStageInterface:
         self.show_communication = show_communication
         self.show_log_messages = show_log_messages
         self.disable_message_callbacks = False
-        self.anchor_point = None # 0 1 3
+        self.anchor_point = None
 
     def connect(self, port: str, baud_rate: int = 921600):
         def version_to_str(v):
@@ -286,6 +288,18 @@ class OpenMicroStageInterface:
         major, minor, patch = map(int, re.match(r'v(\d+)\.(\d+)\.(\d+)', response).groups())
         return major,minor,patch
 
+    def get_anchor_point(self) -> tuple[float, float, float]:
+        """
+        Searchs for an saved anchor and loads it.
+        """
+        if self.anchor_point is None:
+            if os.path.isfile("config/anchor.json"):
+                with open("config/anchor.json", "r") as f:
+                    data: dict[float, float, float] = json.load(f)
+                    self.anchor_point = (data["x"], data["y"], data["z"])
+            else:
+                self.set_anchor_point()
+
     def set_anchor_point(self):
         """
         Queries the current position from the device and saves it as the anchor point.
@@ -294,6 +308,9 @@ class OpenMicroStageInterface:
         if x is not None:
             self.anchor_point = (x, y, z)
             print(f"Anchor point set to: X={x}, Y={y}, Z={z}")
+            anchor_dict = {"x": x, "y": y, "z": z}
+            with open("config/anchor.json", "w") as f:
+                json.dump(anchor_dict, f, indent=4)
             return True
         else:
             print("Failed to read position for anchor point.")

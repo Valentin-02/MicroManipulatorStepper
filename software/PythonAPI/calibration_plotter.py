@@ -36,7 +36,7 @@ def calibrate_and_plot(oms):
 def main():
     # create interface and connect
     oms = OpenMicroStageInterface(show_communication=True, show_log_messages=True)
-    oms.connect('/dev/ttyACM0')
+    oms.connect('COM8')
 
     calibrate_and_plot(oms)
 

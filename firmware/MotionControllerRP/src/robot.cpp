@@ -168,9 +168,13 @@ Robot::Robot(float path_segment_time_step) :
   path_buffering_time_us = 50*1e3;
 
   state = ERobotState::IDLE;
+  hex_sensor = nullptr;
 }
 
 Robot::~Robot() {
+  if(hex_sensor != nullptr)
+    delete hex_sensor;
+
   if(kinematic_model != nullptr)
     delete kinematic_model;
 
@@ -219,6 +223,12 @@ void Robot::init() {
     joints[i]->init(i);
     joints[i]->load_calibration();
   }
+
+  // initialize HEX sensor
+  Serial1.setTX(PIN_HEX_TX);
+  Serial1.setRX(PIN_HEX_RX);
+  Serial1.begin(2000000); // 2 Mbaud
+  hex_sensor = new ResenseHEX(Serial1);
 
   // setup timer for updating the motion controller (which evaluates joint space path
   // segments and produces the current target position for the servo loops)
@@ -640,7 +650,30 @@ void Robot::process_machine_command(const GCodeCommand& cmd, std::string& reply)
   // print lookup table
   if(cmd.get_command() == "M59") {
     int idx = (int)cmd.get_value('J', 0);
-    joints[idx]->servo_controller->get_enc_to_pos_lut().print_to_log();
+   
+  }
+
+  // get HEX sensor data
+  if(cmd.get_command() == "M60") {
+    reply = "";
+    if(hex_sensor != nullptr) {
+      HexFrame frame;
+      if(hex_sensor->triggerAndRead(frame)) {
+        // Format as CSV with generic prefix for easy parsing: "HEX fx fy fz mx my mz temp"
+        reply += "HEX " + std::to_string(frame.fx) + " " +
+                 std::to_string(frame.fy) + " " +
+                 std::to_string(frame.fz) + " " +
+                 std::to_string(frame.mx) + " " +
+                 std::to_string(frame.my) + " " +
+                 std::to_string(frame.mz) + " " +
+                 std::to_string(frame.temperature) + "\n";
+        reply += "ok\n";
+      } else {
+        reply += "error: failed to read HEX sensor\n";
+      }
+    } else {
+      reply += "error: HEX sensor not initialized\n";
+    }
   }
 
   // set linear and angular acceleration

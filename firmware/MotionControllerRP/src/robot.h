@@ -12,6 +12,7 @@
 #include "hardware/MT6701_encoder.h"
 #include "hardware/MT6835_encoder.h"
 #include "hardware/TB6612_motor_driver.h"
+#include "hardware/ResenseHEX.h"
 #include "servo_control/servo_controller.h"
 #include "utilities/lookup_table.h"
 #include "utilities/math_constants.h"
@@ -146,4 +147,6 @@ class Robot : public ICommandProcessor {
 
     FrequencyCounter servo_loop_frequency_counter;
     FrequencyCounter motion_controller_frequency_counter;
+
+    ResenseHEX* hex_sensor;
 };

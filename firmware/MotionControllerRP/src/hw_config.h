@@ -67,6 +67,10 @@ constexpr float CALIBRATION_FIELD_VELOCITY = 40.0f;
   #define PIN_ENCODER_MISO 0
   #define PIN_ENCODER_MOSI 3
 
+  // HEX Force/Torque Sensor (UART0)
+  #define PIN_HEX_TX 16   // GP16 -> UART0 TX -> HEX RX
+  #define PIN_HEX_RX 17   // GP17 -> UART0 RX -> HEX TX
+
 #else
   // Single Axis Board
   #define PIN_BUILTIN_LED 16
@@ -97,4 +101,8 @@ constexpr float CALIBRATION_FIELD_VELOCITY = 40.0f;
   #define PIN_ENCODER_SCK 2
   #define PIN_ENCODER_MISO 0
   #define PIN_ENCODER_MOSI 3
+
+  // HEX Force/Torque Sensor (UART0)
+  #define PIN_HEX_TX 16   // GP16 -> UART0 TX -> HEX RX
+  #define PIN_HEX_RX 17   // GP17 -> UART0 RX -> HEX TX
 #endif

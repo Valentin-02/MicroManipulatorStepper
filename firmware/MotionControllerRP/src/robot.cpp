@@ -169,6 +169,7 @@ Robot::Robot(float path_segment_time_step) :
 
   state = ERobotState::IDLE;
   hex_sensor = nullptr;
+  last_force_update_time = 0;
 }
 
 Robot::~Robot() {
@@ -290,6 +291,52 @@ void Robot::update_path_planner() {
 }
 
 /**
+ * Updates the force controller (called cyclically from core 0 main loop).
+ *
+ * When enabled the outer force-PI loop reads the HEX sensor, computes a
+ * cartesian position correction, translates it to joint space via the
+ * inverse-kinematic model, and writes the resulting targets to shared_data
+ * (bypassing the motion controller ISR).
+ */
+void Robot::update_force_controller() {
+  if (!force_controller.is_enabled() || hex_sensor == nullptr)
+    return;
+
+  // Rate-limit: compute dt from last call
+  uint64_t now_us = time_us_64();
+  float dt = float(now_us - last_force_update_time) * 1e-6f;
+  last_force_update_time = now_us;
+
+  // Guard against first call / large gaps
+  if (dt <= 0.0f || dt > 0.05f)
+    return;
+
+  // Trigger and read HEX sensor (blocking, ~0.2 ms at 2 Mbaud)
+  HexFrame frame;
+  if (!hex_sensor->triggerAndRead(frame))
+    return;
+
+  // Run force-PI → corrected cartesian pose
+  Pose6DF target_pose;
+  if (!force_controller.update(frame, dt, target_pose))
+    return;
+
+  // Inverse kinematics → joint space
+  float joint_positions[NUM_JOINTS];
+  if (!kinematic_model->inverse(target_pose, joint_positions))
+    return;
+
+  // Write new targets to shared_data (same mechanism the motion controller uses)
+  if (spin_try_lock_unsafe(shared_data.lock)) {
+    for (int i = 0; i < NUM_JOINTS; i++) {
+      shared_data.joint_target_positions[i] = joint_positions[i];
+      shared_data.joint_target_velocities[i] = 0.0f;
+    }
+    spin_unlock_unsafe(shared_data.lock);
+  }
+}
+
+/**
  * Updates the motion controller with a timer interrupt in regular intervals.
  * The function evaluates joint space path segments and produces the current 
  * target position for the servo loops.
@@ -308,6 +355,11 @@ bool Robot::update_motion_controller_isr(repeating_timer_t* timer) {
 
   // get current joint position/velocity
   bool update_ok = robot->motion_controller.update(dt, joint_positions, joint_velocities);
+
+  // Skip writing targets when force control is active (force controller
+  // writes its own targets from core 0).
+  if (robot->shared_data.force_control_active)
+    update_ok = false;
 
   // Attempt to acquire spinlock non-blocking and set new target data for the servo loops
   if (update_ok && spin_try_lock_unsafe(robot->shared_data.lock)) {
@@ -676,6 +728,26 @@ void Robot::process_machine_command(const GCodeCommand& cmd, std::string& reply)
     }
   }
 
+  // M61 — enable / disable force control
+  if(cmd.get_command() == "M61") {
+    process_force_control_command(cmd, reply);
+  }
+
+  // M62 — set force target
+  if(cmd.get_command() == "M62") {
+    process_force_target_command(cmd, reply);
+  }
+
+  // M63 — set force controller parameters
+  if(cmd.get_command() == "M63") {
+    process_force_parameter_command(cmd, reply);
+  }
+
+  // M64 — tare HEX sensor
+  if(cmd.get_command() == "M64") {
+    process_tare_hex_command(cmd, reply);
+  }
+
   // set linear and angular acceleration
   if(cmd.get_command() == "M204") {
     if(cmd.has_word('L')) max_acceleration.linear = cmd.get_value('L');
@@ -830,4 +902,100 @@ void Robot::process_calibrate_joint_command(const GCodeCommand& cmd, std::string
 
   bool ok = calibrate_joint(idx, store_calibration, print_measurements);
   reply = ok ? "ok\n" : "error\n";
+}
+
+// ─── Force Control G-Code Handlers ────────────────────────────────────────────
+
+/**
+ * M61 — Enable / disable force control mode.
+ *   M61 S1  → enable  (captures current pose as base)
+ *   M61 S0  → disable (returns to normal position / path control)
+ */
+void Robot::process_force_control_command(const GCodeCommand& cmd, std::string& reply) {
+  if (!cmd.has_word('S')) {
+    // Query: report current state
+    reply = std::string("Force control: ") +
+            (force_controller.is_enabled() ? "enabled" : "disabled") + "\n";
+    reply += "ok\n";
+    return;
+  }
+
+  bool enable = (cmd.get_value('S') >= 0.5f);
+
+  if (enable && hex_sensor == nullptr) {
+    reply = "error: HEX sensor not initialized\n";
+    return;
+  }
+  if (enable && !all_joints_ready) {
+    reply = "error: not all joints calibrated and homed\n";
+    return;
+  }
+
+  // Set flag BEFORE enabling so the ISR sees it immediately
+  shared_data.force_control_active = enable;
+
+  force_controller.set_enabled(enable, current_pose);
+
+  // Seed timer for dt computation
+  last_force_update_time = time_us_64();
+
+  reply = "ok\n";
+}
+
+/**
+ * M62 — Set target force [mN].
+ *   M62 X<fx> Y<fy> Z<fz>
+ */
+void Robot::process_force_target_command(const GCodeCommand& cmd, std::string& reply) {
+  const ForceTarget& cur = force_controller.get_target_force();
+
+  float fx = cmd.get_value('X', cur.fx);
+  float fy = cmd.get_value('Y', cur.fy);
+  float fz = cmd.get_value('Z', cur.fz);
+
+  force_controller.set_target_force(fx, fy, fz);
+
+  reply = "ok\n";
+}
+
+/**
+ * M63 — Set force controller parameters.
+ *   M63 P<kp> I<ki> L<output_limit> W<windup_limit> F<filter_tc> D<max_displacement>
+ *
+ *   P : proportional gain    [mm/mN]
+ *   I : integral gain        [mm/(mN·s)]
+ *   L : PI output limit      [mm]
+ *   W : integral windup limit [mm]
+ *   F : force filter time constant [s]
+ *   D : max displacement from base pose [mm]
+ */
+void Robot::process_force_parameter_command(const GCodeCommand& cmd, std::string& reply) {
+  if (cmd.has_word('P') && cmd.has_word('I')) {
+    float kp = cmd.get_value('P');
+    float ki = cmd.get_value('I');
+    float ol = cmd.get_value('L', 1.0f);   // default output limit 1 mm
+    float wl = cmd.get_value('W', 0.5f);   // default windup 0.5 mm
+    force_controller.set_gains(kp, ki, ol, wl);
+  }
+
+  if (cmd.has_word('F'))
+    force_controller.set_force_filter_tc(cmd.get_value('F'));
+
+  if (cmd.has_word('D'))
+    force_controller.set_max_displacement(cmd.get_value('D'));
+
+  reply = "ok\n";
+}
+
+/**
+ * M64 — Tare (zero) the HEX sensor (blocking).
+ */
+void Robot::process_tare_hex_command(const GCodeCommand& cmd, std::string& reply) {
+  if (hex_sensor == nullptr) {
+    reply = "error: HEX sensor not initialized\n";
+    return;
+  }
+
+  bool ok = hex_sensor->tareBlocking();
+  reply = ok ? "ok\n" : "error: tare failed\n";
 }

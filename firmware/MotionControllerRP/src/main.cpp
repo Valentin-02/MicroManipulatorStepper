@@ -89,6 +89,9 @@ void main_core0() {
     // update motion controller
     robot.update_command_parser();
     robot.update_path_planner();
+
+    // outer force control loop (runs when enabled)
+    robot.update_force_controller();
   }
 }
 

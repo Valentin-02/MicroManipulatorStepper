@@ -14,6 +14,7 @@
 #include "hardware/TB6612_motor_driver.h"
 #include "hardware/ResenseHEX.h"
 #include "servo_control/servo_controller.h"
+#include "servo_control/force_controller.h"
 #include "utilities/lookup_table.h"
 #include "utilities/math_constants.h"
 
@@ -52,6 +53,7 @@ struct SharedData {
 
   volatile float joint_target_positions[NUM_JOINTS];
   volatile float joint_target_velocities[NUM_JOINTS];
+  volatile bool force_control_active = false;  ///< true → motion controller ISR skips writing
   spin_lock_t* lock = nullptr;
 };
 
@@ -100,6 +102,7 @@ class Robot : public ICommandProcessor {
 
     void update_command_parser();            // called from main loop
     void update_path_planner();              // called from main loop
+    void update_force_controller();           // called from main loop (core 0)
     void update_servo_controllers(float dt); // called from seperate cpu-core
 
     void set_pose(const Pose6DF& pos);
@@ -117,6 +120,10 @@ class Robot : public ICommandProcessor {
     void process_set_servo_parameter_command(const GCodeCommand& cmd, std::string& reply);
     void process_home_command(const GCodeCommand& cmd, std::string& reply);
     void process_calibrate_joint_command(const GCodeCommand& cmd, std::string& reply);
+    void process_force_control_command(const GCodeCommand& cmd, std::string& reply);
+    void process_force_target_command(const GCodeCommand& cmd, std::string& reply);
+    void process_force_parameter_command(const GCodeCommand& cmd, std::string& reply);
+    void process_tare_hex_command(const GCodeCommand& cmd, std::string& reply);
 
   protected:
     bool check_all_joints_ready();   // checks if all joints are homed and calibrated
@@ -149,4 +156,6 @@ class Robot : public ICommandProcessor {
     FrequencyCounter motion_controller_frequency_counter;
 
     ResenseHEX* hex_sensor;
+    ForceController force_controller;
+    uint64_t last_force_update_time;
 };

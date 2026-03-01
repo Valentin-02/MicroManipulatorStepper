@@ -128,7 +128,7 @@ bool ForceController::update(const HexFrame& measurement, float dt,
   // ── 3. PI controllers → position correction [mm] ─────────────────────
   correction_x = pid_x.compute(error_fx, dt, one_over_dt);
   correction_y = pid_y.compute(error_fy, dt, one_over_dt);
-  correction_z = pid_z.compute(error_fz, dt, one_over_dt);
+  correction_z = -pid_z.compute(error_fz, dt, one_over_dt); // Negate Z to match coordinate system (force error in +Z means we need to move down, i.e. -Z)
 
   // ── 4. Clamp displacement for safety ──────────────────────────────────
   correction_x = std::clamp(correction_x, -max_displacement, max_displacement);

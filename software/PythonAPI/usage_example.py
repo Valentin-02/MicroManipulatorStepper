@@ -11,7 +11,8 @@ oms.connect('COM8')
 # oms.home()
 
 # move and wait
-oms.move_to(0, 0, 0, f=10)
+oms.move_to(x=5, y=5, z=5, f=10)
+# x+ -> x+, y+ -> y+, z+ -> z-
 oms.wait_for_stop()
 
 # print some info

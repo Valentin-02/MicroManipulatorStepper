@@ -3,6 +3,8 @@ import time
 import re
 from enum import Enum
 
+import os
+import json
 import serial
 import numpy as np
 from colorama import Fore, Style, init
@@ -215,6 +217,10 @@ class OpenMicroStageInterface:
         self.show_communication = show_communication
         self.show_log_messages = show_log_messages
         self.disable_message_callbacks = False
+        # Kalibrierungstabelle: maps angle tuples to (x, y, z) positions
+        self.x_angle_to_position_mapping = {}
+        self.y_angle_to_position_mapping = {}
+        self.z_angle_to_position_mapping = {}
 
     def connect(self, port: str, baud_rate: int = 921600):
         def version_to_str(v):
@@ -397,19 +403,117 @@ class OpenMicroStageInterface:
         """
         ok, response = self.serial.send_command("M51")
         if ok != SerialInterface.ReplyStatus.OK or len(response) == 0:
-            return ok, {}
+            return []
         
-        angles = {}
-        for line in response.strip().splitlines():
-            # Parse: "Joint 0:  123.456 deg  (raw=789.012)"
-            match = re.search(r'Joint (\d+):\s+([-+]?\d*\.?\d+)\s+deg\s+\(raw=([-+]?\d*\.?\d+)\)', line)
+        angles = []
+        for line in response.splitlines():
+            match = re.search(r"Joint \d+:\s+([-+]?\d*\.?\d+)\s+deg", line)
             if match:
-                joint_idx = int(match.group(1))
-                angle = float(match.group(2))
-                raw_angle = float(match.group(3))
-                angles[joint_idx] = {'angle_deg': angle, 'raw_angle': raw_angle}
+                angles.append(float(match.group(1)))
         
-        return ok, angles
+        return angles
+
+    def calibrate_angle_mapping(self, positions_list, feedrate=10.0):
+        """
+        Durchführt eine Kalibrierungsfahrt, bei der verschiedene Positionen angefahren werden
+        und die entsprechenden Encoder-Winkel gespeichert werden.
+        
+        :param positions_list: Liste von Tupeln [(x1, y1, z1), (x2, y2, z2), ...]
+        :param feedrate: Fahrtgeschwindigkeit in mm/s
+        :return: True wenn erfolgreich, False sonst
+        """
+        print(Fore.MAGENTA + f"[Angle Calibration] Starting calibration with {len(positions_list)} positions..." + Style.RESET_ALL)
+        
+        for idx, (x, y, z) in enumerate(positions_list):
+            print(f"[Angle Calibration] Moving to position {idx+1}/{len(positions_list)}: ({x:.3f}, {y:.3f}, {z:.3f})")
+            
+            # Fahre zu der Position
+            res = self.move_to(x, y, z, feedrate, blocking=True)
+            if res != SerialInterface.ReplyStatus.OK:
+                print(Fore.RED + f"[Angle Calibration] Failed to move to position {idx+1}" + Style.RESET_ALL)
+                return False
+            
+            # Warte bis die Bewegung fertig ist
+            time.sleep(0.1)
+            res = self.wait_for_stop(disable_callbacks=True)
+            if res != SerialInterface.ReplyStatus.OK:
+                print(Fore.RED + f"[Angle Calibration] Wait for stop failed at position {idx+1}" + Style.RESET_ALL)
+                return False
+            
+            # Lese die aktuellen Winkel
+            angles = self.read_encoder_angles()
+            if len(angles) == 0:
+                print(Fore.RED + f"[Angle Calibration] Failed to read encoder angles at position {idx+1}" + Style.RESET_ALL)
+                return False
+            
+            # Speichere in Kalibrierungstabelle
+            angle_key = tuple(round(a, 2) for a in angles)  # Runde auf 2 Dezimalstellen für key
+            self.x_angle_to_position_mapping[angle_key[0]] = x
+            self.y_angle_to_position_mapping[angle_key[1]] = y
+            self.z_angle_to_position_mapping[angle_key[2]] = z
+            print(f"[Angle Calibration] Recorded angles: {[f'{a:.2f}°' for a in angles]} -> Position ({x:.3f}, {y:.3f}, {z:.3f})")
+        
+        mapping_table = {"x": self.x_angle_to_position_mapping, "y": self.y_angle_to_position_mapping, "z": self.z_angle_to_position_mapping}
+        with open("config/calibration_mapping.json", "w") as f:
+            json.dump(mapping_table, f, indent=4)
+        
+        print(Fore.GREEN + f"[Angle Calibration] Calibration complete. {len(self.x_angle_to_position_mapping)} positions recorded." + Style.RESET_ALL)
+        return True
+
+    def move_to_current_angle(self, feedrate=10.0):
+        """
+        Liest die aktuellen Encoder-Winkel aus und berechnet die entsprechende Position
+        anhand der Kalibrierungstabelle. Für jede Koordinate wird unabhängig der nächst 
+        mögliche Wert aus der Kalibrierung verwendet.
+        
+        :param feedrate: Fahrtgeschwindigkeit in mm/s
+        :return: Status der Bewegung (OK, ERROR, etc.)
+        """
+        if len(self.x_angle_to_position_mapping) == 0:
+            if os.path.exists("config/calibration_mapping.json"):
+                with open("config/calibration_mapping.json", "r") as f:
+                    mapping_table = json.load(f)
+                    self.x_angle_to_position_mapping = {float(k): v for k, v in mapping_table.get("x", {}).items()}
+                    self.y_angle_to_position_mapping = {float(k): v for k, v in mapping_table.get("y", {}).items()}
+                    self.z_angle_to_position_mapping = {float(k): v for k, v in mapping_table.get("z", {}).items()}
+                print(Fore.GREEN + f"[move_to_current_angle] Loaded calibration mapping from file." + Style.RESET_ALL)
+            else:
+                print(Fore.RED + "[move_to_current_angle] No calibration data available. Run calibrate_angle_mapping() first." + Style.RESET_ALL)
+                return SerialInterface.ReplyStatus.ERROR
+        
+        # Lese aktuelle Winkel
+        current_angles = self.read_encoder_angles()
+        if len(current_angles) == 0:
+            print(Fore.RED + "[move_to_current_angle] Failed to read encoder angles" + Style.RESET_ALL)
+            return SerialInterface.ReplyStatus.ERROR
+        
+        # Runde Winkel für Vergleich
+        angle_key = tuple(round(a, 2) for a in current_angles)
+        target_x, target_y, target_z = None, None, None
+        
+        # Versuche exakte Übereinstimmung zu finden
+        if angle_key[0] in self.x_angle_to_position_mapping:
+            target_x = self.x_angle_to_position_mapping[angle_key[0]]
+        if angle_key[1] in self.y_angle_to_position_mapping:
+            target_y = self.y_angle_to_position_mapping[angle_key[1]]
+        if angle_key[2] in self.z_angle_to_position_mapping:
+            target_z = self.z_angle_to_position_mapping[angle_key[2]]
+        
+        # Sammle alle eindeutigen Werte für jede Koordinate
+        all_x_values = sorted(set(self.x_angle_to_position_mapping.keys()))
+        all_y_values = sorted(set(self.y_angle_to_position_mapping.keys()))
+        all_z_values = sorted(set(self.z_angle_to_position_mapping.keys()))
+        
+        # Finde nächsten Wert für jede Koordinate
+        nearest_x = min(all_x_values, key=lambda x: abs(x - current_angles[0]))
+        nearest_y = min(all_y_values, key=lambda y: abs(y - current_angles[1]))
+        nearest_z = min(all_z_values, key=lambda z: abs(z - current_angles[2]))
+        
+        print(f"[move_to_current_angle] Nearest available X: {nearest_x:.3f}, Y: {nearest_y:.3f}, Z: {nearest_z:.3f}")
+        print(f"[move_to_current_angle] Moving to ({self.x_angle_to_position_mapping[nearest_x]:.3f}, {self.y_angle_to_position_mapping[nearest_y]:.3f}, {self.z_angle_to_position_mapping[nearest_z]:.3f})")
+        
+        return self.move_to(self.x_angle_to_position_mapping[nearest_x], self.y_angle_to_position_mapping[nearest_y], self.z_angle_to_position_mapping[nearest_z], feedrate, blocking=True)
+
 
     def read_device_state_info(self):
         """

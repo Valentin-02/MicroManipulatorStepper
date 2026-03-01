@@ -2,16 +2,17 @@ from open_micro_stage_api import OpenMicroStageInterface
 
 # create interface and connect
 oms = OpenMicroStageInterface(show_communication=True, show_log_messages=True)
-oms.connect('/dev/ttyACM0')
+oms.connect('COM8')
 
 # run this once to calibrate joints
 # for i in range(3): oms.calibrate_joint(i, save_result=True)
 
 # home device
-oms.home()
+# oms.home()
 
 # move and wait
-oms.move_to(0, 0, 0, f=10)
+oms.move_to(x=5, y=5, z=5, f=10)
+# x+ -> x+, y+ -> y+, z+ -> z-
 oms.wait_for_stop()
 
 # print some info

@@ -391,14 +391,63 @@ class OpenMicroStageInterface:
         return float(x), float(y), float(z)
 
     def read_encoder_angles(self):
+        """
+        Reads the absolute encoder angles for all joints.
+        :return: Tuple of (status, dict with joint angles and raw values)
+        """
         ok, response = self.serial.send_command("M51")
         if ok != SerialInterface.ReplyStatus.OK or len(response) == 0:
-            return []
-        return []
+            return ok, {}
+        
+        angles = {}
+        for line in response.strip().splitlines():
+            # Parse: "Joint 0:  123.456 deg  (raw=789.012)"
+            match = re.search(r'Joint (\d+):\s+([-+]?\d*\.?\d+)\s+deg\s+\(raw=([-+]?\d*\.?\d+)\)', line)
+            if match:
+                joint_idx = int(match.group(1))
+                angle = float(match.group(2))
+                raw_angle = float(match.group(3))
+                angles[joint_idx] = {'angle_deg': angle, 'raw_angle': raw_angle}
+        
+        return ok, angles
 
     def read_device_state_info(self):
+        """
+        Reads the device state information including joint status and frequencies.
+        :return: Tuple of (status, dict with device info)
+        """
         res, msg = self.serial.send_command("M57")
-        return res
+        if res != SerialInterface.ReplyStatus.OK or len(msg) == 0:
+            return res, {}
+        
+        info = {}
+        joints_info = {}
+        
+        for line in msg.strip().splitlines():
+            # Parse joint info: "Joint 0:  is_homed=1  is_calibrated=1  encoder_angle=123.456 deg"
+            joint_match = re.search(
+                r'Joint (\d+):\s+is_homed=(\d+)\s+is_calibrated=(\d+)\s+encoder_angle=([-+]?\d*\.?\d+)\s+deg',
+                line
+            )
+            if joint_match:
+                joint_idx = int(joint_match.group(1))
+                joints_info[joint_idx] = {
+                    'is_homed': bool(int(joint_match.group(2))),
+                    'is_calibrated': bool(int(joint_match.group(3))),
+                    'encoder_angle_deg': float(joint_match.group(4))
+                }
+            
+            # Parse frequencies
+            servo_match = re.search(r'Servo Loop:\s+(\d+)\s+kHz', line)
+            if servo_match:
+                info['servo_loop_freq_hz'] = int(servo_match.group(1)) * 1000
+            
+            motion_match = re.search(r'Motion Controler:\s+(\d+)\s+Hz', line)
+            if motion_match:
+                info['motion_controller_freq_hz'] = int(motion_match.group(1))
+        
+        info['joints'] = joints_info
+        return res, info
 
     def set_servo_parameter(self, pos_kp=150, pos_ki=50000, vel_kp=0.2, vel_ki=100, vel_filter_tc=0.0025):
         cmd = f"M55 A{pos_kp:.6f} B{pos_ki:.6f} C{vel_kp:.6f} D{vel_ki:.6f} F{vel_filter_tc:.6f}"
@@ -422,6 +471,133 @@ class OpenMicroStageInterface:
     def send_command(self, cmd: str, timeout_s: float=5):
         res, msg = self.serial.send_command(cmd, timeout_s)
         return res, msg
+
+    def get_queue_size(self):
+        """
+        Gets the current motion queue size.
+        :return: Tuple of (status, queue_size)
+        """
+        res, msg = self.serial.send_command("M52")
+        if res != SerialInterface.ReplyStatus.OK or len(msg) == 0:
+            return res, 0
+        
+        match = re.search(r'Queue Size:\s+(\d+)', msg)
+        if match:
+            return res, int(match.group(1))
+        return res, 0
+
+    def print_lookup_table(self, joint_index: int):
+        """
+        Prints the lookup table for a specific joint.
+        :param joint_index: Index of the joint (0-based)
+        :return: Tuple of (status, lookup_table)
+        """
+        cmd = f"M59 J{joint_index}"
+        res, msg = self.serial.send_command(cmd)
+        return res, msg
+
+    def read_hex_sensor(self):
+        """
+        Reads a single data frame from the HEX force/torque sensor.
+        :return: Tuple of (status, dict with forces and torques)
+        """
+        res, msg = self.serial.send_command("M60")
+        if res != SerialInterface.ReplyStatus.OK or len(msg) == 0:
+            return res, {}
+        
+        # Parse: "HEX fx fy fz mx my mz temperature"
+        match = re.search(
+            r'HEX\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+'
+            r'([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)',
+            msg
+        )
+        if match:
+            return res, {
+                'fx': float(match.group(1)),
+                'fy': float(match.group(2)),
+                'fz': float(match.group(3)),
+                'mx': float(match.group(4)),
+                'my': float(match.group(5)),
+                'mz': float(match.group(6)),
+                'temperature': float(match.group(7))
+            }
+        return res, {}
+
+    def enable_force_control(self, enable: bool):
+        """
+        Enable or disable force control mode.
+        When enabled, captures the current pose as the base pose.
+        :param enable: True to enable, False to disable
+        :return: Status of the command
+        """
+        cmd = f"M61 S{1 if enable else 0}"
+        res, msg = self.serial.send_command(cmd)
+        return res
+
+    def set_force_target(self, fx: float, fy: float, fz: float):
+        """
+        Sets the target force for force control.
+        :param fx: Target force in X direction [mN]
+        :param fy: Target force in Y direction [mN]
+        :param fz: Target force in Z direction [mN]
+        :return: Status of the command
+        """
+        cmd = f"M62 X{fx:.6f} Y{fy:.6f} Z{fz:.6f}"
+        res, msg = self.serial.send_command(cmd)
+        return res
+
+    def set_force_parameters(self, kp: float = None, ki: float = None, 
+                           output_limit: float = None, windup_limit: float = None,
+                           filter_tc: float = None, max_displacement: float = None):
+        """
+        Sets the force controller parameters.
+        :param kp: Proportional gain [mm/mN]
+        :param ki: Integral gain [mm/(mN·s)]
+        :param output_limit: PI output limit [mm]
+        :param windup_limit: Integral windup limit [mm]
+        :param filter_tc: Force filter time constant [s]
+        :param max_displacement: Max displacement from base pose [mm]
+        :return: Status of the command
+        """
+        cmd = "M63"
+        
+        if kp is not None and ki is not None:
+            cmd += f" P{kp:.6f} I{ki:.6f}"
+            if output_limit is not None:
+                cmd += f" L{output_limit:.6f}"
+            if windup_limit is not None:
+                cmd += f" W{windup_limit:.6f}"
+        
+        if filter_tc is not None:
+            cmd += f" F{filter_tc:.6f}"
+        
+        if max_displacement is not None:
+            cmd += f" D{max_displacement:.6f}"
+        
+        res, msg = self.serial.send_command(cmd)
+        return res
+
+    def tare_hex_sensor(self):
+        """
+        Tares (zeroes) the HEX force/torque sensor (blocking operation).
+        :return: Status of the command
+        """
+        res, msg = self.serial.send_command("M64")
+        return res
+
+    def get_force_control_state(self):
+        """
+        Query the current state of force control.
+        :return: Tuple of (status, is_enabled)
+        """
+        res, msg = self.serial.send_command("M61")
+        if res != SerialInterface.ReplyStatus.OK or len(msg) == 0:
+            return res, None
+        
+        match = re.search(r'Force control:\s+(enabled|disabled)', msg)
+        if match:
+            return res, match.group(1) == 'enabled'
+        return res, None
 
     @staticmethod
     def _parse_table_data(data_string, cols):

@@ -48,6 +48,21 @@ class ForceControlMonitor:
         self.current_target = {'fx': 0.0, 'fy': 0.0, 'fz': 0.0}  # user target [N]
         self.controller_target = {'fx': 0.0, 'fy': 0.0, 'fz': 0.0}  # command sent to FW [N]
         self.force_bias = {'fx': 0.0, 'fy': 0.0, 'fz': 0.0}  # post-tare residual bias [N]
+
+    @staticmethod
+    def _apply_symmetric_force_axis(ax, measured_values_n, target_values_n=None,
+                                    min_half_range_n=0.5, include_target_in_scale=False):
+        """Force plot helper: keep 0 centered and show measured dynamics clearly."""
+        measured = np.array(measured_values_n, dtype=float)
+        candidates = [float(np.max(np.abs(measured))), min_half_range_n]
+        if include_target_in_scale and target_values_n is not None and len(target_values_n) > 0:
+            targets = np.array(target_values_n, dtype=float)
+            candidates.append(float(np.max(np.abs(targets))))
+
+        abs_max = max(candidates)
+        y_margin = max(0.05 * abs_max, 0.05)
+        ax.set_ylim(-(abs_max + y_margin), abs_max + y_margin)
+        ax.axhline(y=0.0, color='k', linestyle=':', linewidth=1.0, alpha=0.7)
         
     def connect(self, port, baud_rate=921600):
         """Connect to the device"""
@@ -210,9 +225,9 @@ class ForceControlMonitor:
                         fx_n = sensor_data['fx'] / 1000.0
                         fy_n = sensor_data['fy'] / 1000.0
                         fz_n = sensor_data['fz'] / 1000.0
-                        print(f"  [{elapsed:.1f}s] Fx: {fx_n:7.4f} N | "
-                              f"Fy: {fy_n:7.4f} N | "
-                              f"Fz: {fz_n:7.4f} N")
+                        print(f"  [{elapsed:.1f}s] Fx: {fx_n:+8.4f} N | "
+                            f"Fy: {fy_n:+8.4f} N | "
+                            f"Fz: {fz_n:+8.4f} N")
                 
                 # Wait before next sample
                 time.sleep(self.update_interval_ms / 1000.0)
@@ -257,6 +272,7 @@ class ForceControlMonitor:
                     label=f'Target ({fx_targ_n[0] if fx_targ_n else 0:.4f} N)', linewidth=2)
         ax1.set_ylabel('Force X [N]', fontsize=11)
         ax1.set_title('X-Axis Force Control')
+        self._apply_symmetric_force_axis(ax1, fx_meas_n, fx_targ_n, include_target_in_scale=False)
         ax1.grid(True, alpha=0.3)
         ax1.legend(loc='best')
         
@@ -266,6 +282,7 @@ class ForceControlMonitor:
                     label=f'Target ({fy_targ_n[0] if fy_targ_n else 0:.4f} N)', linewidth=2)
         ax2.set_ylabel('Force Y [N]', fontsize=11)
         ax2.set_title('Y-Axis Force Control')
+        self._apply_symmetric_force_axis(ax2, fy_meas_n, fy_targ_n, include_target_in_scale=False)
         ax2.grid(True, alpha=0.3)
         ax2.legend(loc='best')
         
@@ -276,6 +293,7 @@ class ForceControlMonitor:
         ax3.set_xlabel('Time [s]', fontsize=11)
         ax3.set_ylabel('Force Z [N]', fontsize=11)
         ax3.set_title('Z-Axis Force Control')
+        self._apply_symmetric_force_axis(ax3, fz_meas_n, fz_targ_n, include_target_in_scale=False)
         ax3.grid(True, alpha=0.3)
         ax3.legend(loc='best')
         
@@ -393,9 +411,9 @@ def main():
     # Configuration
     PORT = 'COM8'           # Serial port (change to your port)
     COLLECTION_TIME = 30.0  # Data collection time [s]
-    TARGET_FZ = 3    # Target force Z-axis [N]
+    TARGET_FZ = 0         # Target force Z-axis [N]
     TARGET_FX = 0        # Target force X-axis [N]
-    TARGET_FY = 0       # Target force Y-axis [N]
+    TARGET_FY = 10       # Target force Y-axis [N]
     
     monitor = ForceControlMonitor(max_samples=1000, update_interval_ms=50)
     

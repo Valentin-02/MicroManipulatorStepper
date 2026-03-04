@@ -9,7 +9,7 @@
  * @brief Implementation of the outer cartesian force control loop.
  *
  * The controller runs three independent PI loops (one per cartesian axis)
- * that map force error [mN] to a position correction [mm].  The corrected
+ * that map force error [N] to a position correction [mm].  The corrected
  * pose is built from a latched base pose plus the PI output and handed to
  * the existing position-velocity cascade via the inverse-kinematics path.
  */
@@ -27,11 +27,11 @@ ForceController::ForceController()
     , correction_x(0.0f), correction_y(0.0f), correction_z(0.0f)
     , max_displacement(1.0f)  // safety default: 1 mm max displacement
 {
-  // Conservative default gains
-  //   kP = 0.001  mm/mN   → 1 µm per mN of force error
-  //   kI = 0.01   mm/(mN·s) → eliminates steady-state error
-  float kp = 0.001f;
-  float ki = 0.01f;
+  // Conservative default gains (Newton-based, 1000x larger than mN-based)
+  //   kP = 1.0    mm/N      → 1 µm per µN of force error
+  //   kI = 10.0   mm/(N·s)  → eliminates steady-state error
+  float kp = 1.0f;
+  float ki = 10.0f;
   float output_limit = 1.0f;   // mm
   float windup_limit = 0.5f;   // mm
 

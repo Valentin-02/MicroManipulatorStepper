@@ -943,7 +943,7 @@ void Robot::process_force_control_command(const GCodeCommand& cmd, std::string& 
 }
 
 /**
- * M62 — Set target force [mN].
+ * M62 — Set target force [N].
  *   M62 X<fx> Y<fy> Z<fz>
  */
 void Robot::process_force_target_command(const GCodeCommand& cmd, std::string& reply) {
@@ -962,8 +962,8 @@ void Robot::process_force_target_command(const GCodeCommand& cmd, std::string& r
  * M63 — Set force controller parameters.
  *   M63 P<kp> I<ki> L<output_limit> W<windup_limit> F<filter_tc> D<max_displacement>
  *
- *   P : proportional gain    [mm/mN]
- *   I : integral gain        [mm/(mN·s)]
+ *   P : proportional gain    [mm/N]
+ *   I : integral gain        [mm/(N·s)]
  *   L : PI output limit      [mm]
  *   W : integral windup limit [mm]
  *   F : force filter time constant [s]

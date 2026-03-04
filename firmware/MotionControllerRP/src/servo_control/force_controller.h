@@ -35,9 +35,9 @@
 // ─── ForceTarget ─────────────────────────────────────────────────────────────
 
 struct ForceTarget {
-  float fx = 0.0f;  ///< Target force X [mN]
-  float fy = 0.0f;  ///< Target force Y [mN]
-  float fz = 0.0f;  ///< Target force Z [mN]
+  float fx = 0.0f;  ///< Target force X [N]
+  float fy = 0.0f;  ///< Target force Y [N]
+  float fz = 0.0f;  ///< Target force Z [N]
 };
 
 // ─── ForceController ─────────────────────────────────────────────────────────
@@ -71,8 +71,8 @@ public:
   /**
    * @brief Set PI gains and limits (applied to all three axes equally).
    *
-   * @param kp             Proportional gain  [mm / mN]
-   * @param ki             Integral gain      [mm / (mN · s)]
+   * @param kp             Proportional gain  [mm / N]
+   * @param ki             Integral gain      [mm / (N · s)]
    * @param output_limit   Max absolute position correction per axis [mm]
    * @param windup_limit   Max absolute integral contribution [mm]
    */

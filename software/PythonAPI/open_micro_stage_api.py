@@ -603,26 +603,42 @@ class OpenMicroStageInterface:
     def read_hex_sensor(self):
         """
         Reads a single data frame from the HEX force/torque sensor.
-        :return: Tuple of (status, dict with forces and torques)
+        Converts forces from Newton [N] to Millinewton [mN] for consistency.
+        :return: Tuple of (status, dict with forces [mN] and torques [mNm])
         """
         res, msg = self.serial.send_command("M60")
         if res != SerialInterface.ReplyStatus.OK or len(msg) == 0:
             return res, {}
         
         # Parse: "HEX fx fy fz mx my mz temperature"
+        # Sensor outputs forces in [N], convert to [mN] for API consistency
+        # Enhanced regex to handle both decimal (0.001) and scientific (1e-3) notation
         match = re.search(
-            r'HEX\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+'
-            r'([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)',
+            r'HEX\s+([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s+'
+            r'([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s+'
+            r'([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s+'
+            r'([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s+'
+            r'([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s+'
+            r'([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s+'
+            r'([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)',
             msg
         )
         if match:
+            # Convert forces from Newton to Millinewton (N × 1000 = mN)
+            fx_n = float(match.group(1))
+            fy_n = float(match.group(2))
+            fz_n = float(match.group(3))
+            mx_mnm = float(match.group(4))
+            my_mnm = float(match.group(5))
+            mz_mnm = float(match.group(6))
+            
             return res, {
-                'fx': float(match.group(1)),
-                'fy': float(match.group(2)),
-                'fz': float(match.group(3)),
-                'mx': float(match.group(4)),
-                'my': float(match.group(5)),
-                'mz': float(match.group(6)),
+                'fx': fx_n * 1000.0,          # N → mN
+                'fy': fy_n * 1000.0,          # N → mN
+                'fz': fz_n * 1000.0,          # N → mN
+                'mx': mx_mnm,                 # Already in mNm
+                'my': my_mnm,                 # Already in mNm
+                'mz': mz_mnm,                 # Already in mNm
                 'temperature': float(match.group(7))
             }
         return res, {}
@@ -681,13 +697,15 @@ class OpenMicroStageInterface:
         res, msg = self.serial.send_command(cmd)
         return res
 
-    def tare_hex_sensor(self):
+    def tare_hex_sensor(self, timeout_s: float = 30.0):
         """
         Tares (zeroes) the HEX force/torque sensor (blocking operation).
+        :param timeout_s: Timeout in seconds for the blocking tare command.
         :return: Status of the command
         """
-        res, msg = self.serial.send_command("M64")
-        print(msg)
+        res, msg = self.serial.send_command("M64", timeout=timeout_s)
+        if msg:
+            print(msg)
         return res
 
     def get_force_control_state(self):

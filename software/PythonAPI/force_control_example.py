@@ -45,7 +45,9 @@ class ForceControlMonitor:
         
         self.stage = None
         self.start_time = None
-        self.current_target = {'fx': 0.0, 'fy': 0.0, 'fz': 0.0}
+        self.current_target = {'fx': 0.0, 'fy': 0.0, 'fz': 0.0}  # user target [N]
+        self.controller_target = {'fx': 0.0, 'fy': 0.0, 'fz': 0.0}  # command sent to FW [N]
+        self.force_bias = {'fx': 0.0, 'fy': 0.0, 'fz': 0.0}  # post-tare residual bias [N]
         
     def connect(self, port, baud_rate=921600):
         """Connect to the device"""
@@ -68,42 +70,95 @@ class ForceControlMonitor:
         time.sleep(0.5)
         
         # Tare HEX sensor
-        # print("Taring HEX force/torque sensor...")
-        # status = self.stage.tare_hex_sensor()
-        # if status != SerialInterface.ReplyStatus.OK:
-        #     print(f"Error taring sensor: {status}")
-        #     return False
-        # time.sleep(0.5)
+        print("Taring HEX force/torque sensor...")
+        status = self.stage.tare_hex_sensor(timeout_s=30.0)
+        if status != SerialInterface.ReplyStatus.OK:
+            print(f"Error taring sensor: {status}")
+            return False
+        time.sleep(0.5)
+
+        # Measure residual bias after tare (for diagnostics / optional compensation)
+        self.measure_force_bias(samples=20, sample_interval_s=0.05)
         
         print("✓ Initialization complete\n")
         return True
     
-    def enable_force_control(self, target_fx=0.0, target_fy=0.0, target_fz=0.0):
+    def measure_force_bias(self, samples=20, sample_interval_s=0.05):
+        """Measure residual force bias after tare by averaging HEX readings."""
+        fx_vals = []
+        fy_vals = []
+        fz_vals = []
+
+        for _ in range(samples):
+            status, sensor_data = self.stage.read_hex_sensor()
+            if status == SerialInterface.ReplyStatus.OK and sensor_data:
+                # API returns forces in mN
+                fx_vals.append(sensor_data['fx'] / 1000.0)
+                fy_vals.append(sensor_data['fy'] / 1000.0)
+                fz_vals.append(sensor_data['fz'] / 1000.0)
+            time.sleep(sample_interval_s)
+
+        if len(fx_vals) > 0:
+            self.force_bias = {
+                'fx': float(np.mean(fx_vals)),
+                'fy': float(np.mean(fy_vals)),
+                'fz': float(np.mean(fz_vals))
+            }
+            print("Residual bias after tare:")
+            print(f"  Fx={self.force_bias['fx']:.4f} N, Fy={self.force_bias['fy']:.4f} N, Fz={self.force_bias['fz']:.4f} N")
+        else:
+            print("Warning: Could not measure post-tare force bias")
+
+    def enable_force_control(self, target_fx=0.0, target_fy=0.0, target_fz=0.0, compensate_bias=True):
         """
         Enable force control with target force
-        :param target_fx: Target force X [mN]
-        :param target_fy: Target force Y [mN]
-        :param target_fz: Target force Z [mN]
+        :param target_fx: Target force X [N]
+        :param target_fy: Target force Y [N]
+        :param target_fz: Target force Z [N]
+        :param compensate_bias: If True, adds measured post-tare bias to controller target
         """
         print("=== Force Control Setup ===")
         
         # Set force controller parameters
         print("Setting force controller parameters...")
         status = self.stage.set_force_parameters(
-            kp=0.01,              # Proportional gain [mm/mN]
-            ki=0.002,             # Integral gain [mm/(mN·s)]
-            output_limit=2.0,     # Max position correction [mm]
-            windup_limit=1.0,     # Integral windup limit [mm]
+            kp=1.0,               # Proportional gain [mm/N]
+            ki=5.0,               # Integral gain [mm/(N·s)]
+            output_limit=1.0,     # Max position correction [mm]
+            windup_limit=0.5,     # Integral windup limit [mm]
             filter_tc=0.005,      # Force filter time constant [s]
-            max_displacement=5.0  # Max displacement from base pose [mm]
+            max_displacement=2.0  # Max displacement from base pose [mm]
         )
         if status != SerialInterface.ReplyStatus.OK:
             print(f"Error setting parameters: {status}")
             return False
+
+        # Desired force target in sensor frame [N]
+        self.current_target = {'fx': target_fx, 'fy': target_fy, 'fz': target_fz}
+
+        # Controller target (optional residual-bias compensation)
+        if compensate_bias:
+            self.controller_target = {
+                'fx': target_fx + self.force_bias['fx'],
+                'fy': target_fy + self.force_bias['fy'],
+                'fz': target_fz + self.force_bias['fz']
+            }
+            print("Applying residual-bias compensation to target")
+        else:
+            self.controller_target = dict(self.current_target)
         
         # Set target force
-        print(f"Setting target force: Fx={target_fx:.1f} mN, Fy={target_fy:.1f} mN, Fz={target_fz:.1f} mN")
-        status = self.stage.set_force_target(target_fx, target_fy, target_fz)
+        print(
+            f"Setting controller target force: "
+            f"Fx={self.controller_target['fx']:.4f} N, "
+            f"Fy={self.controller_target['fy']:.4f} N, "
+            f"Fz={self.controller_target['fz']:.4f} N"
+        )
+        status = self.stage.set_force_target(
+            self.controller_target['fx'],
+            self.controller_target['fy'],
+            self.controller_target['fz']
+        )
         if status != SerialInterface.ReplyStatus.OK:
             print(f"Error setting target force: {status}")
             return False
@@ -115,7 +170,6 @@ class ForceControlMonitor:
             print(f"Error enabling force control: {status}")
             return False
         
-        self.current_target = {'fx': target_fx, 'fy': target_fy, 'fz': target_fz}
         print("✓ Force control enabled\n")
         return True
     
@@ -151,11 +205,14 @@ class ForceControlMonitor:
                     
                     sample_count += 1
                     
-                    # Print progress
+                    # Print progress (sensor data is in mN from API conversion)
                     if sample_count % 10 == 0:
-                        print(f"  [{elapsed:.1f}s] Fx: {sensor_data['fx']:7.2f} mN | "
-                              f"Fy: {sensor_data['fy']:7.2f} mN | "
-                              f"Fz: {sensor_data['fz']:7.2f} mN")
+                        fx_n = sensor_data['fx'] / 1000.0
+                        fy_n = sensor_data['fy'] / 1000.0
+                        fz_n = sensor_data['fz'] / 1000.0
+                        print(f"  [{elapsed:.1f}s] Fx: {fx_n:7.4f} N | "
+                              f"Fy: {fy_n:7.4f} N | "
+                              f"Fz: {fz_n:7.4f} N")
                 
                 # Wait before next sample
                 time.sleep(self.update_interval_ms / 1000.0)
@@ -185,30 +242,39 @@ class ForceControlMonitor:
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 9))
         fig.suptitle('Force Control Data', fontsize=16, fontweight='bold')
         
+        # Convert measured values to Newton for display (sensor data from API is in mN)
+        fx_meas_n = [x / 1000.0 for x in fx_measured]
+        fy_meas_n = [x / 1000.0 for x in fy_measured]
+        fz_meas_n = [x / 1000.0 for x in fz_measured]
+        # Target values are already in Newton
+        fx_targ_n = fx_target
+        fy_targ_n = fy_target
+        fz_targ_n = fz_target
+        
         # Plot X-axis force
-        ax1.plot(times, fx_measured, 'b-', label='Measured', linewidth=1.5)
-        ax1.axhline(y=fx_target[0] if fx_target else 0, color='r', linestyle='--', 
-                    label=f'Target ({fx_target[0] if fx_target else 0:.1f} mN)', linewidth=2)
-        ax1.set_ylabel('Force X [mN]', fontsize=11)
+        ax1.plot(times, fx_meas_n, 'b-', label='Measured', linewidth=1.5)
+        ax1.axhline(y=fx_targ_n[0] if fx_targ_n else 0, color='r', linestyle='--', 
+                    label=f'Target ({fx_targ_n[0] if fx_targ_n else 0:.4f} N)', linewidth=2)
+        ax1.set_ylabel('Force X [N]', fontsize=11)
         ax1.set_title('X-Axis Force Control')
         ax1.grid(True, alpha=0.3)
         ax1.legend(loc='best')
         
         # Plot Y-axis force
-        ax2.plot(times, fy_measured, 'g-', label='Measured', linewidth=1.5)
-        ax2.axhline(y=fy_target[0] if fy_target else 0, color='r', linestyle='--', 
-                    label=f'Target ({fy_target[0] if fy_target else 0:.1f} mN)', linewidth=2)
-        ax2.set_ylabel('Force Y [mN]', fontsize=11)
+        ax2.plot(times, fy_meas_n, 'g-', label='Measured', linewidth=1.5)
+        ax2.axhline(y=fy_targ_n[0] if fy_targ_n else 0, color='r', linestyle='--', 
+                    label=f'Target ({fy_targ_n[0] if fy_targ_n else 0:.4f} N)', linewidth=2)
+        ax2.set_ylabel('Force Y [N]', fontsize=11)
         ax2.set_title('Y-Axis Force Control')
         ax2.grid(True, alpha=0.3)
         ax2.legend(loc='best')
         
         # Plot Z-axis force
-        ax3.plot(times, fz_measured, 'orange', label='Measured', linewidth=1.5)
-        ax3.axhline(y=fz_target[0] if fz_target else 0, color='r', linestyle='--', 
-                    label=f'Target ({fz_target[0] if fz_target else 0:.1f} mN)', linewidth=2)
+        ax3.plot(times, fz_meas_n, 'orange', label='Measured', linewidth=1.5)
+        ax3.axhline(y=fz_targ_n[0] if fz_targ_n else 0, color='r', linestyle='--', 
+                    label=f'Target ({fz_targ_n[0] if fz_targ_n else 0:.4f} N)', linewidth=2)
         ax3.set_xlabel('Time [s]', fontsize=11)
-        ax3.set_ylabel('Force Z [mN]', fontsize=11)
+        ax3.set_ylabel('Force Z [N]', fontsize=11)
         ax3.set_title('Z-Axis Force Control')
         ax3.grid(True, alpha=0.3)
         ax3.legend(loc='best')
@@ -222,9 +288,9 @@ class ForceControlMonitor:
             print("Not enough data for 3D plot")
             return
         
-        fx = list(self.fx_measured)
-        fy = list(self.fy_measured)
-        fz = list(self.fz_measured)
+        fx = [x / 1000.0 for x in self.fx_measured]
+        fy = [x / 1000.0 for x in self.fy_measured]
+        fz = [x / 1000.0 for x in self.fz_measured]
         
         fig = plt.figure(figsize=(10, 8))
         ax = fig.add_subplot(111, projection='3d')
@@ -243,9 +309,9 @@ class ForceControlMonitor:
                   [self.current_target['fz']], color='orange', s=150, marker='*', 
                   label='Target', edgecolors='black', linewidth=2)
         
-        ax.set_xlabel('Force X [mN]', fontsize=11)
-        ax.set_ylabel('Force Y [mN]', fontsize=11)
-        ax.set_zlabel('Force Z [mN]', fontsize=11)
+        ax.set_xlabel('Force X [N]', fontsize=11)
+        ax.set_ylabel('Force Y [N]', fontsize=11)
+        ax.set_zlabel('Force Z [N]', fontsize=11)
         ax.set_title('3D Force Vector Trajectory', fontsize=14, fontweight='bold')
         ax.legend()
         ax.grid(True)
@@ -259,36 +325,37 @@ class ForceControlMonitor:
             print("No data available for statistics")
             return
         
-        fx = np.array(list(self.fx_measured))
-        fy = np.array(list(self.fy_measured))
-        fz = np.array(list(self.fz_measured))
+        # Convert from mN (API output) to N
+        fx = np.array(list(self.fx_measured)) / 1000.0
+        fy = np.array(list(self.fy_measured)) / 1000.0
+        fz = np.array(list(self.fz_measured)) / 1000.0
         
         print("=== Force Data Statistics ===")
         print(f"\nX-Axis Force:")
-        print(f"  Mean:   {np.mean(fx):8.2f} mN")
-        print(f"  Std:    {np.std(fx):8.2f} mN")
-        print(f"  Min:    {np.min(fx):8.2f} mN")
-        print(f"  Max:    {np.max(fx):8.2f} mN")
+        print(f"  Mean:   {np.mean(fx):8.4f} N")
+        print(f"  Std:    {np.std(fx):8.4f} N")
+        print(f"  Min:    {np.min(fx):8.4f} N")
+        print(f"  Max:    {np.max(fx):8.4f} N")
         
         print(f"\nY-Axis Force:")
-        print(f"  Mean:   {np.mean(fy):8.2f} mN")
-        print(f"  Std:    {np.std(fy):8.2f} mN")
-        print(f"  Min:    {np.min(fy):8.2f} mN")
-        print(f"  Max:    {np.max(fy):8.2f} mN")
+        print(f"  Mean:   {np.mean(fy):8.4f} N")
+        print(f"  Std:    {np.std(fy):8.4f} N")
+        print(f"  Min:    {np.min(fy):8.4f} N")
+        print(f"  Max:    {np.max(fy):8.4f} N")
         
         print(f"\nZ-Axis Force:")
-        print(f"  Mean:   {np.mean(fz):8.2f} mN")
-        print(f"  Std:    {np.std(fz):8.2f} mN")
-        print(f"  Min:    {np.min(fz):8.2f} mN")
-        print(f"  Max:    {np.max(fz):8.2f} mN")
+        print(f"  Mean:   {np.mean(fz):8.4f} N")
+        print(f"  Std:    {np.std(fz):8.4f} N")
+        print(f"  Min:    {np.min(fz):8.4f} N")
+        print(f"  Max:    {np.max(fz):8.4f} N")
         
         # Calculate magnitude
         magnitude = np.sqrt(fx**2 + fy**2 + fz**2)
         print(f"\nForce Magnitude:")
-        print(f"  Mean:   {np.mean(magnitude):8.2f} mN")
-        print(f"  Std:    {np.std(magnitude):8.2f} mN")
-        print(f"  Min:    {np.min(magnitude):8.2f} mN")
-        print(f"  Max:    {np.max(magnitude):8.2f} mN")
+        print(f"  Mean:   {np.mean(magnitude):8.4f} N")
+        print(f"  Std:    {np.std(magnitude):8.4f} N")
+        print(f"  Min:    {np.min(magnitude):8.4f} N")
+        print(f"  Max:    {np.max(magnitude):8.4f} N")
         
         # Calculate error from target
         target_magnitude = np.sqrt(
@@ -298,9 +365,9 @@ class ForceControlMonitor:
         )
         error = magnitude - target_magnitude
         
-        print(f"\nTracking Error (vs target {target_magnitude:.2f} mN):")
-        print(f"  Mean Error: {np.mean(error):8.2f} mN")
-        print(f"  Std Error:  {np.std(error):8.2f} mN")
+        print(f"\nTracking Error (vs target {target_magnitude:.4f} N):")
+        print(f"  Mean Error: {np.mean(error):8.4f} N")
+        print(f"  Std Error:  {np.std(error):8.4f} N")
         print()
     
     def disconnect(self):
@@ -326,9 +393,9 @@ def main():
     # Configuration
     PORT = 'COM8'           # Serial port (change to your port)
     COLLECTION_TIME = 30.0  # Data collection time [s]
-    TARGET_FZ = 0.0        # Target force Z-axis [mN]
-    TARGET_FX = 0.0         # Target force X-axis [mN]
-    TARGET_FY = 3000.0         # Target force Y-axis [mN]
+    TARGET_FZ = 3    # Target force Z-axis [N]
+    TARGET_FX = 0        # Target force X-axis [N]
+    TARGET_FY = 0       # Target force Y-axis [N]
     
     monitor = ForceControlMonitor(max_samples=1000, update_interval_ms=50)
     

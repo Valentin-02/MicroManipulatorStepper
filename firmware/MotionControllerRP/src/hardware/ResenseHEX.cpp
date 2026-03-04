@@ -10,7 +10,7 @@ float ResenseHEX::_forceMax = 5000.0f;
 float ResenseHEX::_torqueMax = 10.0f;
 float ResenseHEX::_tempMax = 150.0f;
 uint16_t ResenseHEX::_readTimeoutMs = 300;
-uint16_t ResenseHEX::_tareTimeoutMs = 20000;
+uint16_t ResenseHEX::_tareTimeoutMs = 60000;
 
 // Constructor - initialize with a serial stream reference
 ResenseHEX::ResenseHEX(Stream &serial)

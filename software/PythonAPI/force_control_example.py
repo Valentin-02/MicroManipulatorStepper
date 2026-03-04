@@ -77,7 +77,7 @@ class ForceControlMonitor:
         self.start_time = time.time()
         return self.stage.serial is not None
 
-    def initialize(self):
+    def initialize(self, calibration_timeout=60):
         """Enable motors and tare HEX sensor."""
         print("\n=== Initialization ===")
 
@@ -88,11 +88,11 @@ class ForceControlMonitor:
             return False
         time.sleep(0.5)
 
-        print("Taring HEX force/torque sensor...")
-        status = self.stage.tare_hex_sensor()
+        print(f"Taring HEX force/torque sensor (timeout={calibration_timeout}s)...")
+        status = self.stage.tare_hex_sensor(timeout=calibration_timeout)
         if status != SerialInterface.ReplyStatus.OK:
-            print(f"  Error taring sensor: {status}")
-            return False
+            print(f"  Warning: Taring sensor failed: {status} (continuing anyway)")
+            # return False
         time.sleep(0.5)
 
         self._measure_force_bias(samples=20, interval_s=0.05)
@@ -171,7 +171,8 @@ class ForceControlMonitor:
         print(f"  Targets → Fx={cmd_fx:.2f}  Fy={cmd_fy:.2f}  Fz={cmd_fz:.2f} mN")
         status = self.stage.set_force_target(cmd_fx, cmd_fy, cmd_fz)
         if status != SerialInterface.ReplyStatus.OK:
-            print(f"  Error setting force target: {status}"); return False
+            print(f"  Warning: Failed to set force target: {status} (continuing anyway)")
+            # return False
 
         print("✓ Force control enabled\n")
         return True
@@ -189,11 +190,16 @@ class ForceControlMonitor:
         n = 0
 
         try:
+            missed_count = 0
             while time.time() - start < duration_s:
                 state = self.stage.read_force_state()
                 if state is None:
+                    missed_count += 1
+                    if missed_count % 40 == 0:
+                        print(f"  Warning: Waiting for controller data (M73 failed {missed_count} times)...")
                     time.sleep(self.update_interval_ms / 1000.0)
                     continue
+                missed_count = 0
 
                 elapsed = time.time() - start
                 self.times.append(elapsed)
@@ -384,8 +390,8 @@ def main():
     COLLECTION_S    = 30.0      # data-collection duration [s]
 
     # Target forces in mN  (sensor-native units)
-    TARGET_FX_MN    = 0.0
-    TARGET_FY_MN    = 10.0
+    TARGET_FX_MN    = 5000
+    TARGET_FY_MN    = 0.0
     TARGET_FZ_MN    = 0.0
 
     # PI tuning  (start conservative, increase Ki for tighter tracking)

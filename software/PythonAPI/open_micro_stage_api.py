@@ -5,6 +5,8 @@ import json
 import os
 from enum import Enum
 
+import os
+import json
 import serial
 import numpy as np
 from colorama import Fore, Style, init
@@ -217,6 +219,10 @@ class OpenMicroStageInterface:
         self.show_communication = show_communication
         self.show_log_messages = show_log_messages
         self.disable_message_callbacks = False
+        # Kalibrierungstabelle: maps angle tuples to (x, y, z) positions
+        self.x_angle_to_position_mapping = {}
+        self.y_angle_to_position_mapping = {}
+        self.z_angle_to_position_mapping = {}
         # Kalibrierungstabelle: maps angle tuples to (x, y, z) positions
         self.x_angle_to_position_mapping = {}
         self.y_angle_to_position_mapping = {}

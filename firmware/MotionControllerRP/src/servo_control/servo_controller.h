@@ -37,10 +37,15 @@ class ServoController {
     // get the motor position to field angle lookup table
     const LookupTable& get_pos_to_field_lut() const;
 
-    // Updates the servo loop. 
+    // Updates the servo loop (cascaded position→velocity→torque PID).
     void update(float target_motor_pos,
                 float dt,
                 float one_over_dt);
+
+    // Applies a torque command directly, bypassing position/velocity PID.
+    // Still reads encoder for commutation field angle and position safety monitoring.
+    // Returns current motor position (for safety checks).
+    float update_torque(float torque_command, float dt);
 
     // Checks if the motor is at position (uses values from previous update() call).
     bool at_position(float motor_pos_eps);

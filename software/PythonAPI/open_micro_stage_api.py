@@ -423,6 +423,163 @@ class OpenMicroStageInterface:
         res, msg = self.serial.send_command(cmd, timeout_s)
         return res, msg
 
+    # --- Force Control API ----------------------------------------------------------------
+
+    def set_force_target(self, fx: float = 0.0, fy: float = 0.0, fz: float = 0.0):
+        """
+        Enable force control and set target forces for X, Y, Z (in mN or sensor-native units).
+        Motors must be enabled (enable_motors(True)) and calibrated first.
+
+        :param fx: Target force in X direction (Motor 0).
+        :param fy: Target force in Y direction (Motor 1).
+        :param fz: Target force in Z direction (Motor 2).
+        :return: Status of the command.
+        """
+        cmd = f"M70 X{fx:.6f} Y{fy:.6f} Z{fz:.6f}"
+        res, msg = self.serial.send_command(cmd)
+        return res
+
+    def disable_force_control(self):
+        """
+        Disable force control and return to position control mode.
+        Torque outputs are zeroed and position targets are re-synced to current encoder positions.
+        :return: Status of the command.
+        """
+        res, msg = self.serial.send_command("M70 S0")
+        return res
+
+    def set_force_pi_parameters(self, kp: float, ki: float,
+                                output_limit: float = 1.4137,
+                                windup_limit: float = 1.4137):
+        """
+        Set PI controller parameters for all three force control axes.
+
+        :param kp: Proportional gain.
+        :param ki: Integral gain.
+        :param output_limit: Maximum torque command (field angle offset in rad). Default ≈ π*0.45.
+        :param windup_limit: Anti-windup integral saturation limit (rad). Default ≈ π*0.45.
+        :return: Status of the command.
+        """
+        cmd = f"M71 P{kp:.6f} I{ki:.6f} L{output_limit:.6f} W{windup_limit:.6f}"
+        res, msg = self.serial.send_command(cmd)
+        return res
+
+    def set_force_safety_limits(self, limit_axis0: float, limit_axis1: float, limit_axis2: float):
+        """
+        Set symmetric safety position limits (±limit) for each motor axis (in radians).
+        If an encoder position exceeds the limit, the torque for that axis is zeroed.
+
+        :param limit_axis0: Position limit for axis 0 (Motor X) in rad.
+        :param limit_axis1: Position limit for axis 1 (Motor Y) in rad.
+        :param limit_axis2: Position limit for axis 2 (Motor Z) in rad.
+        :return: Status of the command.
+        """
+        cmd = f"M72 A{limit_axis0:.6f} B{limit_axis1:.6f} C{limit_axis2:.6f}"
+        res, msg = self.serial.send_command(cmd)
+        return res
+
+    def set_force_safety_limits_asymmetric(self,
+                                           min0: float, max0: float,
+                                           min1: float, max1: float,
+                                           min2: float, max2: float):
+        """
+        Set asymmetric safety position limits for each motor axis (in radians).
+
+        :param min0: Minimum position for axis 0.
+        :param max0: Maximum position for axis 0.
+        :param min1: Minimum position for axis 1.
+        :param max1: Maximum position for axis 1.
+        :param min2: Minimum position for axis 2.
+        :param max2: Maximum position for axis 2.
+        :return: Status of the command.
+        """
+        cmd = f"M72 A{min0:.6f} B{max0:.6f} C{min1:.6f} D{max1:.6f} E{min2:.6f} F{max2:.6f}"
+        res, msg = self.serial.send_command(cmd)
+        return res
+
+    def read_force_state(self):
+        """
+        Query the current force controller state.
+
+        :return: dict with keys: mode, target, measured, error, torque, motor_pos,
+                 safety, limits, pi_params, fc_freq. Returns None on error.
+        """
+        res, response = self.serial.send_command("M73")
+        if res != SerialInterface.ReplyStatus.OK or not response:
+            return None
+
+        state = {}
+        for line in response.strip().splitlines():
+            parts = line.strip().split()
+            if not parts:
+                continue
+            key = parts[0]
+            values = parts[1:]
+            if key == 'MODE':
+                state['mode'] = values[0] if values else 'UNKNOWN'
+            elif key == 'TARGET':
+                state['target'] = [float(v) for v in values]
+            elif key == 'MEASURED':
+                state['measured'] = [float(v) for v in values]
+            elif key == 'ERROR':
+                state['error'] = [float(v) for v in values]
+            elif key == 'TORQUE':
+                state['torque'] = [float(v) for v in values]
+            elif key == 'MOTOR_POS':
+                state['motor_pos'] = [float(v) for v in values]
+            elif key == 'SAFETY':
+                state['safety'] = [bool(int(float(v))) for v in values]
+            elif key == 'LIMITS':
+                vals = [float(v) for v in values]
+                state['limits'] = {
+                    'axis0': (vals[0], vals[1]),
+                    'axis1': (vals[2], vals[3]),
+                    'axis2': (vals[4], vals[5]),
+                } if len(vals) >= 6 else {}
+            elif key == 'PI':
+                vals = [float(v) for v in values]
+                state['pi_params'] = {
+                    'kp': vals[0], 'ki': vals[1],
+                    'output_limit': vals[2], 'windup_limit': vals[3]
+                } if len(vals) >= 4 else {}
+            elif key == 'FC_FREQ':
+                state['fc_freq'] = int(float(values[0])) if values else 0
+        return state
+
+    def read_hex_sensor(self):
+        """
+        Read one force/torque measurement from the HEX sensor.
+
+        :return: dict with keys fx, fy, fz, mx, my, mz, temperature. None on error.
+        """
+        res, response = self.serial.send_command("M60")
+        if res != SerialInterface.ReplyStatus.OK or not response:
+            return None
+
+        match = re.search(
+            r"HEX\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+"
+            r"([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)\s+([-+]?\d*\.?\d+)",
+            response
+        )
+        if not match:
+            return None
+
+        vals = [float(v) for v in match.groups()]
+        return {
+            'fx': vals[0], 'fy': vals[1], 'fz': vals[2],
+            'mx': vals[3], 'my': vals[4], 'mz': vals[5],
+            'temperature': vals[6]
+        }
+
+    def tare_hex_sensor(self):
+        """
+        Tare (zero) the HEX force/torque sensor. This is a blocking operation
+        that takes several seconds.
+        :return: Status of the command.
+        """
+        res, msg = self.serial.send_command("M60 T", timeout=30)
+        return res
+
     @staticmethod
     def _parse_table_data(data_string, cols):
         # Parse the data

@@ -89,6 +89,7 @@ void main_core0() {
     // update motion controller
     robot.update_command_parser();
     robot.update_path_planner();
+    robot.update_force_controller();  // runs force control loop when in force mode
   }
 }
 

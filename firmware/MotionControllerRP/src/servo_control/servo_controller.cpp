@@ -104,6 +104,29 @@ void ServoController::update(float target_motor_pos, float dt, float one_over_dt
   motor_pos_prev = motor_pos;
 }
 
+float ServoController::update_torque(float torque_command, float dt) {
+  if(encoder_update_enabled == false)
+    return motor_pos;
+
+  // read encoder (needed for field angle commutation)
+  int32_t encoder_angle_raw = encoder.read_abs_angle_raw();
+
+  // convert encoder angle to motor pos and compute field angle
+  motor_pos = encoder_angle_to_motor_pos(encoder_angle_raw);
+  float field_angle = motor_pos_to_field_angle(motor_pos);
+
+  // apply torque command directly (no position or velocity PID)
+  output = torque_command;
+
+  // set new field direction
+  if(motor_update_enabled) {
+    motor_driver.set_field_angle(field_angle + output);
+  }
+
+  motor_pos_prev = motor_pos;
+  return motor_pos;
+}
+
 bool ServoController::at_position(float motor_pos_eps) {
   return fabs(pos_error) < motor_pos_eps;
 }

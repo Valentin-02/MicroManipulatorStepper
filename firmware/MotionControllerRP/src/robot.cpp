@@ -152,6 +152,7 @@ Robot::Robot(float path_segment_time_step) :
   motion_controller(&path_planner),
   servo_loop_frequency_counter(10000),
   motion_controller_frequency_counter(1000),
+  force_controller_frequency_counter(1000),
   shared_data(SPINLOCK_ID_SHARED_DATA),
   joints_spin_lock(spin_lock_instance(SPINLOCK_ID_JOINTS))
 {
@@ -168,6 +169,12 @@ Robot::Robot(float path_segment_time_step) :
   path_buffering_time_us = 50*1e3;
 
   state = ERobotState::IDLE;
+  control_mode = EControlMode::POSITION;
+  shared_data.force_control_active = false;
+  for(int i=0; i<NUM_JOINTS; i++) {
+    shared_data.joint_torque_commands[i] = 0.0f;
+    shared_data.joint_motor_positions[i] = 0.0f;
+  }
   hex_sensor = nullptr;
 }
 
@@ -330,23 +337,102 @@ bool Robot::update_motion_controller_isr(repeating_timer_t* timer) {
 void Robot::update_servo_controllers(float dt) {
   float one_over_dt = 1.0f/dt;
 
-  // update axis target position and velocity from shared data
+  // --- Force control mode ---
   spin_lock_unsafe_blocking(shared_data.lock);
-  for(int i=0; i<3; i++) {
-    joints[i]->update_target(shared_data.joint_target_positions[i], 
-                             shared_data.joint_target_velocities[i]);
-  }
+  bool force_mode = shared_data.force_control_active;
   spin_unlock_unsafe(shared_data.lock);
 
-  // update servo loop for each axis
-  spin_lock_unsafe_blocking(joints_spin_lock);
-  for(int i=0; i<NUM_JOINTS; i++) {
-    joints[i]->update(dt, one_over_dt);
+  if (force_mode) {
+    // Read torque commands from shared data
+    float torque_cmds[NUM_JOINTS];
+    spin_lock_unsafe_blocking(shared_data.lock);
+    for (int i = 0; i < NUM_JOINTS; i++) {
+      torque_cmds[i] = shared_data.joint_torque_commands[i];
+    }
+    spin_unlock_unsafe(shared_data.lock);
+
+    // Apply torque commands directly (bypass position/velocity PID)
+    float motor_positions[NUM_JOINTS];
+    spin_lock_unsafe_blocking(joints_spin_lock);
+    for (int i = 0; i < NUM_JOINTS; i++) {
+      motor_positions[i] = joints[i]->servo_controller->update_torque(torque_cmds[i], dt);
+    }
+    spin_unlock_unsafe(joints_spin_lock);
+
+    // Write back motor positions for safety monitoring (read by force controller on Core 0)
+    spin_lock_unsafe_blocking(shared_data.lock);
+    for (int i = 0; i < NUM_JOINTS; i++) {
+      shared_data.joint_motor_positions[i] = motor_positions[i];
+    }
+    spin_unlock_unsafe(shared_data.lock);
+
+  } else {
+    // --- Position control mode (original) ---
+    // update axis target position and velocity from shared data
+    spin_lock_unsafe_blocking(shared_data.lock);
+    for(int i=0; i<3; i++) {
+      joints[i]->update_target(shared_data.joint_target_positions[i], 
+                               shared_data.joint_target_velocities[i]);
+    }
+    spin_unlock_unsafe(shared_data.lock);
+
+    // update servo loop for each axis
+    spin_lock_unsafe_blocking(joints_spin_lock);
+    for(int i=0; i<NUM_JOINTS; i++) {
+      joints[i]->update(dt, one_over_dt);
+    }
+    spin_unlock_unsafe(joints_spin_lock);
   }
-  spin_unlock_unsafe(joints_spin_lock);
 
   // update frequency counter
   servo_loop_frequency_counter.update(dt);
+}
+
+/**
+ * Updates the force controller. Called from Core 0 main loop.
+ * Reads HEX force sensor, runs PI, writes torque commands to shared data.
+ */
+void Robot::update_force_controller() {
+  if (control_mode != EControlMode::FORCE || hex_sensor == nullptr)
+    return;
+
+  // Read HEX force/torque sensor (blocking ~200-500µs)
+  HexFrame frame;
+  bool sensor_ok = hex_sensor->triggerAndRead(frame);
+
+  if (!sensor_ok) return;
+
+  // Get motor positions from Core 1 (for safety monitoring)
+  float motor_positions[NUM_JOINTS];
+  spin_lock_unsafe_blocking(shared_data.lock);
+  for (int i = 0; i < NUM_JOINTS; i++) {
+    motor_positions[i] = shared_data.joint_motor_positions[i];
+  }
+  spin_unlock_unsafe(shared_data.lock);
+
+  // Compute dt for force control loop
+  static uint64_t last_fc_time = time_us_64();
+  uint64_t now = time_us_64();
+  float dt = float(now - last_fc_time) * 1e-6f;
+  last_fc_time = now;
+  if (dt <= 0.0f || dt > 0.01f) dt = 0.001f;  // clamp to reasonable range
+
+  // Map HEX sensor forces to axes: Motor0=X(fx), Motor1=Y(fy), Motor2=Z(fz)
+  float measured_forces[NUM_JOINTS] = { frame.fx, frame.fy, frame.fz };
+
+  // Run force PI controller
+  float torque_outputs[NUM_JOINTS];
+  bool control_ok = force_controller.update(measured_forces, motor_positions, dt, torque_outputs);
+
+  // Write torque commands to shared data for Core 1
+  spin_lock_unsafe_blocking(shared_data.lock);
+  for (int i = 0; i < NUM_JOINTS; i++) {
+    shared_data.joint_torque_commands[i] = torque_outputs[i];
+  }
+  spin_unlock_unsafe(shared_data.lock);
+
+  // Update frequency counter
+  force_controller_frequency_counter.update(dt);
 }
 
 void Robot::enable_servo_control(bool enable) {
@@ -682,6 +768,28 @@ void Robot::process_machine_command(const GCodeCommand& cmd, std::string& reply)
     if(cmd.has_word('A')) max_acceleration.angular = cmd.get_value('A');
     reply += "ok\n";
   }
+
+  // --- Force control commands ---
+
+  // M70: Set target forces / enable/disable force control
+  if(cmd.get_command() == "M70") {
+    process_force_target_command(cmd, reply);
+  }
+
+  // M71: Set force controller PI parameters
+  if(cmd.get_command() == "M71") {
+    process_force_pi_param_command(cmd, reply);
+  }
+
+  // M72: Set force safety position limits
+  if(cmd.get_command() == "M72") {
+    process_force_safety_command(cmd, reply);
+  }
+
+  // M73: Query force controller state
+  if(cmd.get_command() == "M73") {
+    process_force_state_command(cmd, reply);
+  }
 }
 
 void Robot::process_motion_command(const GCodeCommand& cmd, std::string& reply) {
@@ -830,4 +938,171 @@ void Robot::process_calibrate_joint_command(const GCodeCommand& cmd, std::string
 
   bool ok = calibrate_joint(idx, store_calibration, print_measurements);
   reply = ok ? "ok\n" : "error\n";
+}
+
+//--- Force Control Commands ------------------------------------------------------------
+
+/**
+ * M70: Set target forces and enable/disable force control.
+ *   M70 X<fx> Y<fy> Z<fz>  - Set target forces (mN) and enable force control
+ *   M70 S0                  - Disable force control, return to position mode
+ *
+ * When enabling force control:
+ *   - Position/velocity servo loops are bypassed
+ *   - Motors must be enabled (M17) and calibrated
+ *   - HEX sensor must be present
+ */
+void Robot::process_force_target_command(const GCodeCommand& cmd, std::string& reply) {
+  // Disable force control
+  if (cmd.has_word('S') && cmd.get_value('S') == 0.0f) {
+    LOG_INFO("Force control: disabling");
+    force_controller.disable();
+    control_mode = EControlMode::POSITION;
+
+    // Signal Core 1 to return to position mode
+    spin_lock_unsafe_blocking(shared_data.lock);
+    shared_data.force_control_active = false;
+    for (int i = 0; i < NUM_JOINTS; i++)
+      shared_data.joint_torque_commands[i] = 0.0f;
+    spin_unlock_unsafe(shared_data.lock);
+
+    // Re-sync position targets to current encoder positions
+    set_pose(pose_from_joint_angles());
+
+    reply = "ok\n";
+    return;
+  }
+
+  // Enable force control with target forces
+  if (!cmd.has_word('X') && !cmd.has_word('Y') && !cmd.has_word('Z')) {
+    reply = "error: specify at least one of X Y Z, or S0 to disable\n";
+    return;
+  }
+
+  if (hex_sensor == nullptr) {
+    reply = "error: HEX sensor not initialized\n";
+    return;
+  }
+
+  float fx = cmd.get_value('X', 0.0f);
+  float fy = cmd.get_value('Y', 0.0f);
+  float fz = cmd.get_value('Z', 0.0f);
+
+  force_controller.set_target_force(fx, fy, fz);
+
+  // Enable force control if not already active
+  if (control_mode != EControlMode::FORCE) {
+    LOG_INFO("Force control: enabling (target fx=%.3f fy=%.3f fz=%.3f)", fx, fy, fz);
+    force_controller.enable();
+    control_mode = EControlMode::FORCE;
+
+    // Signal Core 1 to switch to torque mode
+    spin_lock_unsafe_blocking(shared_data.lock);
+    shared_data.force_control_active = true;
+    for (int i = 0; i < NUM_JOINTS; i++)
+      shared_data.joint_torque_commands[i] = 0.0f;
+    spin_unlock_unsafe(shared_data.lock);
+  } else {
+    LOG_INFO("Force control: updating targets (fx=%.3f fy=%.3f fz=%.3f)", fx, fy, fz);
+  }
+
+  reply = "ok\n";
+}
+
+/**
+ * M71: Set force controller PI parameters.
+ *   M71 P<kp> I<ki> L<output_limit> W<windup_limit>
+ *
+ * All parameters are applied to all 3 axes simultaneously.
+ * - P (Kp): proportional gain
+ * - I (Ki): integral gain  
+ * - L: output saturation limit (field angle offset in rad)
+ * - W: anti-windup limit (integral saturation in rad)
+ */
+void Robot::process_force_pi_param_command(const GCodeCommand& cmd, std::string& reply) {
+  auto& cfg = force_controller.get_config();
+
+  float kp = cmd.get_value('P', cfg.kp);
+  float ki = cmd.get_value('I', cfg.ki);
+  float out_lim = cmd.get_value('L', cfg.output_limit);
+  float wu_lim = cmd.get_value('W', cfg.windup_limit);
+
+  force_controller.set_pi_parameters(kp, ki, out_lim, wu_lim);
+
+  LOG_INFO("Force PI: kp=%.6f ki=%.6f out_lim=%.4f wu_lim=%.4f", kp, ki, out_lim, wu_lim);
+  reply = "ok\n";
+}
+
+/**
+ * M72: Set force controller safety position limits.
+ *   M72 A<limit0> B<limit1> C<limit2>  - Symmetric limits (±limit in rad)
+ *   M72 A<min0> B<max0> C<min1> D<max1> E<min2> F<max2>  - Asymmetric limits
+ *
+ * When only A B C are given: limits are symmetric ±A, ±B, ±C
+ * When all A-F are given: A/B=axis0 min/max, C/D=axis1 min/max, E/F=axis2 min/max
+ */
+void Robot::process_force_safety_command(const GCodeCommand& cmd, std::string& reply) {
+  bool has_asymmetric = cmd.has_word('A') && cmd.has_word('B') && cmd.has_word('C') &&
+                        cmd.has_word('D') && cmd.has_word('E') && cmd.has_word('F');
+
+  if (has_asymmetric) {
+    // Asymmetric: A/B=axis0 min/max, C/D=axis1 min/max, E/F=axis2 min/max
+    force_controller.set_safety_limits(0, cmd.get_value('A'), cmd.get_value('B'));
+    force_controller.set_safety_limits(1, cmd.get_value('C'), cmd.get_value('D'));
+    force_controller.set_safety_limits(2, cmd.get_value('E'), cmd.get_value('F'));
+  } else if (cmd.has_word('A') && cmd.has_word('B') && cmd.has_word('C')) {
+    // Symmetric: ±A, ±B, ±C
+    force_controller.set_safety_limits(0, cmd.get_value('A'));
+    force_controller.set_safety_limits(1, cmd.get_value('B'));
+    force_controller.set_safety_limits(2, cmd.get_value('C'));
+  } else {
+    reply = "error: specify A B C for symmetric limits, or A-F for asymmetric limits\n";
+    return;
+  }
+
+  const auto& cfg = force_controller.get_config();
+  LOG_INFO("Force safety limits: [%.3f..%.3f] [%.3f..%.3f] [%.3f..%.3f]",
+           cfg.pos_limit_min[0], cfg.pos_limit_max[0],
+           cfg.pos_limit_min[1], cfg.pos_limit_max[1],
+           cfg.pos_limit_min[2], cfg.pos_limit_max[2]);
+  reply = "ok\n";
+}
+
+/**
+ * M73: Query force controller state.
+ *   Returns current state including: mode, targets, measured forces,
+ *   errors, torque outputs, motor positions, safety status.
+ */
+void Robot::process_force_state_command(const GCodeCommand& cmd, std::string& reply) {
+  const auto& st = force_controller.get_state();
+  const auto& cfg = force_controller.get_config();
+
+  reply  = std::string("MODE ") + (force_controller.is_active() ? "FORCE" : "POSITION") + "\n";
+  reply += "TARGET " + std::to_string(st.target_force[0]) + " " +
+                       std::to_string(st.target_force[1]) + " " +
+                       std::to_string(st.target_force[2]) + "\n";
+  reply += "MEASURED " + std::to_string(st.measured_force[0]) + " " +
+                         std::to_string(st.measured_force[1]) + " " +
+                         std::to_string(st.measured_force[2]) + "\n";
+  reply += "ERROR " + std::to_string(st.force_error[0]) + " " +
+                      std::to_string(st.force_error[1]) + " " +
+                      std::to_string(st.force_error[2]) + "\n";
+  reply += "TORQUE " + std::to_string(st.torque_output[0]) + " " +
+                       std::to_string(st.torque_output[1]) + " " +
+                       std::to_string(st.torque_output[2]) + "\n";
+  reply += "MOTOR_POS " + std::to_string(st.motor_position[0]) + " " +
+                          std::to_string(st.motor_position[1]) + " " +
+                          std::to_string(st.motor_position[2]) + "\n";
+  reply += "SAFETY " + std::to_string(st.axis_safety_triggered[0]) + " " +
+                       std::to_string(st.axis_safety_triggered[1]) + " " +
+                       std::to_string(st.axis_safety_triggered[2]) + "\n";
+  reply += "LIMITS " + std::to_string(cfg.pos_limit_min[0]) + " " + std::to_string(cfg.pos_limit_max[0]) + " " +
+                       std::to_string(cfg.pos_limit_min[1]) + " " + std::to_string(cfg.pos_limit_max[1]) + " " +
+                       std::to_string(cfg.pos_limit_min[2]) + " " + std::to_string(cfg.pos_limit_max[2]) + "\n";
+  reply += "PI " + std::to_string(cfg.kp) + " " + std::to_string(cfg.ki) + " " +
+                   std::to_string(cfg.output_limit) + " " + std::to_string(cfg.windup_limit) + "\n";
+
+  uint32_t fc_freq = force_controller_frequency_counter.get();
+  reply += "FC_FREQ " + std::to_string(fc_freq) + " Hz\n";
+  reply += "ok\n";
 }

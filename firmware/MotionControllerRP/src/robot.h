@@ -20,6 +20,7 @@
 #include "motion_control/path_planner.h"
 #include "motion_control/motion_controller.h"
 #include "command_parser/command_parser.h"
+#include "force_control/force_controller.h"
 
 constexpr int ENCODER_LUT_SIZE = 256; 
 
@@ -42,6 +43,11 @@ enum class ERobotState {
   ERROR = 3
 };
 
+enum class EControlMode {
+  POSITION = 0,
+  FORCE    = 1
+};
+
 //--- SharedData ------------------------------------------------------------------------
 
 // shared data used to communicte between CPU cores
@@ -52,6 +58,11 @@ struct SharedData {
 
   volatile float joint_target_positions[NUM_JOINTS];
   volatile float joint_target_velocities[NUM_JOINTS];
+
+  // Force control mode data
+  volatile bool  force_control_active = false;
+  volatile float joint_torque_commands[NUM_JOINTS] = {0.0f};
+  volatile float joint_motor_positions[NUM_JOINTS] = {0.0f};  // encoder positions written back by Core 1
   spin_lock_t* lock = nullptr;
 };
 
@@ -100,6 +111,7 @@ class Robot : public ICommandProcessor {
 
     void update_command_parser();            // called from main loop
     void update_path_planner();              // called from main loop
+    void update_force_controller();          // called from main loop (force control mode)
     void update_servo_controllers(float dt); // called from seperate cpu-core
 
     void set_pose(const Pose6DF& pos);
@@ -118,12 +130,19 @@ class Robot : public ICommandProcessor {
     void process_home_command(const GCodeCommand& cmd, std::string& reply);
     void process_calibrate_joint_command(const GCodeCommand& cmd, std::string& reply);
 
+    // Force control M-commands
+    void process_force_target_command(const GCodeCommand& cmd, std::string& reply);      // M70
+    void process_force_pi_param_command(const GCodeCommand& cmd, std::string& reply);    // M71
+    void process_force_safety_command(const GCodeCommand& cmd, std::string& reply);      // M72
+    void process_force_state_command(const GCodeCommand& cmd, std::string& reply);       // M73
+
   protected:
     bool check_all_joints_ready();   // checks if all joints are homed and calibrated
     static bool update_motion_controller_isr(repeating_timer_t* timer); // called from update timer
 
   private:
     ERobotState state;
+    EControlMode control_mode;
     uint32_t path_buffering_time_us;
     uint64_t path_buffering_start_time;
 
@@ -147,6 +166,8 @@ class Robot : public ICommandProcessor {
 
     FrequencyCounter servo_loop_frequency_counter;
     FrequencyCounter motion_controller_frequency_counter;
+    FrequencyCounter force_controller_frequency_counter;
 
+    ForceController force_controller;
     ResenseHEX* hex_sensor;
 };

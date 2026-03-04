@@ -687,6 +687,7 @@ class OpenMicroStageInterface:
         :return: Status of the command
         """
         res, msg = self.serial.send_command("M64")
+        print(msg)
         return res
 
     def get_force_control_state(self):

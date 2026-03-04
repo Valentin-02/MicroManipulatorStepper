@@ -9,11 +9,11 @@ oms.connect('COM8')
 
 # home device
 # oms.home()
-
+oms.enable_motors(True)
 # move and wait
-oms.move_to(x=5, y=5, z=5, f=10)
-# x+ -> x+, y+ -> y+, z+ -> z-
-oms.wait_for_stop()
+# oms.move_to(x=0, y=0, z=0, f=10)
+# # x+ -> x+, y+ -> y+, z+ -> z-
+# oms.wait_for_stop()
 
-# print some info
-oms.read_device_state_info()
+# # print some info
+# oms.read_device_state_info()

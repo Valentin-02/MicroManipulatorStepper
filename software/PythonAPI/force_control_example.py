@@ -53,7 +53,7 @@ class ForceControlMonitor:
         self.stage = OpenMicroStageInterface(show_communication=True, show_log_messages=True)
         self.stage.connect(port, baud_rate)
         self.start_time = time.time()
-        return self.stage is not None
+        return self.stage.serial is not None
         
     def initialize(self):
         """Initialize the robot: enable motors, home, and tare sensor"""
@@ -67,21 +67,13 @@ class ForceControlMonitor:
             return False
         time.sleep(0.5)
         
-        # Home all axes
-        print("Homing all axes...")
-        status = self.stage.home()
-        if status != SerialInterface.ReplyStatus.OK:
-            print(f"Error homing: {status}")
-            return False
-        time.sleep(0.5)
-        
         # Tare HEX sensor
-        print("Taring HEX force/torque sensor...")
-        status = self.stage.tare_hex_sensor()
-        if status != SerialInterface.ReplyStatus.OK:
-            print(f"Error taring sensor: {status}")
-            return False
-        time.sleep(0.5)
+        # print("Taring HEX force/torque sensor...")
+        # status = self.stage.tare_hex_sensor()
+        # if status != SerialInterface.ReplyStatus.OK:
+        #     print(f"Error taring sensor: {status}")
+        #     return False
+        # time.sleep(0.5)
         
         print("✓ Initialization complete\n")
         return True
@@ -334,9 +326,9 @@ def main():
     # Configuration
     PORT = 'COM8'           # Serial port (change to your port)
     COLLECTION_TIME = 30.0  # Data collection time [s]
-    TARGET_FZ = 50.0        # Target force Z-axis [mN]
+    TARGET_FZ = 0.0        # Target force Z-axis [mN]
     TARGET_FX = 0.0         # Target force X-axis [mN]
-    TARGET_FY = 0.0         # Target force Y-axis [mN]
+    TARGET_FY = 3000.0         # Target force Y-axis [mN]
     
     monitor = ForceControlMonitor(max_samples=1000, update_interval_ms=50)
     

@@ -30,7 +30,7 @@ def main():
     fig, ax = plt.subplots(1, 1, figsize=(10, 7), sharex='all')
 
     for i in range(3):
-        res, data = oms.calibrate_joint(i, save_result=False)
+        res, data = oms.calibrate_joint(i, save_result=True)
         plot_calibration_data(ax, None, f'Actuator {i}', data)
 
     # Adjust layout and show

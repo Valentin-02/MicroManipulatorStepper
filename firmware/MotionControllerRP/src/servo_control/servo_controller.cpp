@@ -45,11 +45,11 @@ void ServoController::init(float max_motor_amplitude) {
   motor_driver.set_field_angle(0.0f);
 
   velocity_lowpass.set_time_constant(0.004f);
-  pos_controller.set_parameter(75.0f, 50000.0f, 0.0f, Constants::PI_F*2.0F, Constants::PI_F*0.5F);
-  velocity_controller.set_parameter(0.2f, 150.0f, 0.0f, Constants::PI_F*0.45f, Constants::PI_F*0.45f);
+  // pos_controller.set_parameter(75.0f, 50000.0f, 0.0f, Constants::PI_F*2.0F, Constants::PI_F*0.5F);
+  // velocity_controller.set_parameter(0.2f, 150.0f, 0.0f, Constants::PI_F*0.45f, Constants::PI_F*0.45f);
 
- // pos_controller.set_parameter(75.0f, 2000.0f, 0.0f, Constants::PI_F*2.0F, Constants::PI_F*0.5F);
- // velocity_controller.set_parameter(0.2f, 0.0f, 0.0f, Constants::PI_F*0.45f, Constants::PI_F*0.45f);
+  pos_controller.set_parameter(75.0f, 2000.0f, 0.0f, Constants::PI_F*2.0F, Constants::PI_F*0.5F);
+  velocity_controller.set_parameter(0.2f, 0.0f, 0.0f, Constants::PI_F*0.45f, Constants::PI_F*0.45f);
 }
 
 void ServoController::set_enc_to_pos_lut(LookupTable& lut) {
